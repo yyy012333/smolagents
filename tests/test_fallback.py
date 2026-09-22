@@ -1,7 +1,7 @@
 import pytest
 
 from smolagents.fallback import ErrorClass, FallbackMetrics, FallbackModel, classify_error, is_transient_error
-from smolagents.models import ChatMessage, MessageRole, Model
+from smolagents.models import ChatMessage, ChatMessageStreamDelta, MessageRole, Model
 
 
 def test_classify_rate_limit():
@@ -139,4 +139,32 @@ def test_transient_error_exhausts_then_falls_back():
 
     assert result.content == "ok-from-backup"   # 重试耗尽后降级
     assert primary.calls == 2                   # transient_retries=2 → 恰好 2 次
+    assert model.metrics.summary()["fallback_count"] == 1
+
+
+class StreamingFakeModel(Model):
+    def __init__(self, model_id="stream", fail_on_first=False):
+        super().__init__(model_id=model_id)
+        self.fail_on_first = fail_on_first
+
+    def generate_stream(self, messages, **kwargs):
+        if self.fail_on_first:
+            def gen():
+                raise Exception("502 Bad Gateway")
+                yield  # pragma: no cover
+            return gen()
+        def gen():
+            yield ChatMessageStreamDelta(content="hello")
+            yield ChatMessageStreamDelta(content=" world")
+        return gen()
+
+
+def test_generate_stream_falls_back_on_first_delta_failure():
+    primary = StreamingFakeModel(model_id="primary", fail_on_first=True)
+    backup = StreamingFakeModel(model_id="backup")
+    model = FallbackModel([primary, backup])
+
+    deltas = list(model.generate_stream([ChatMessage(role=MessageRole.USER, content="hi")]))
+
+    assert "".join(d.content for d in deltas) == "hello world"
     assert model.metrics.summary()["fallback_count"] == 1

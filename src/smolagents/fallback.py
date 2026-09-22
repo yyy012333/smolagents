@@ -1,8 +1,8 @@
 from enum import Enum
 from logging import getLogger
-from typing import Any
+from typing import Any, Generator
 
-from .models import ChatMessage, Model
+from .models import ChatMessage, ChatMessageStreamDelta, Model
 from .utils import Retrying
 
 logger = getLogger(__name__)
@@ -124,4 +124,42 @@ class FallbackModel(Model):
                     "Model '%s' failed (%s: %s), falling back.",
                     self._model_name(model), e.__class__.__name__, e,
                 )
+        raise last_error
+
+    def generate_stream(
+        self,
+        messages,
+        stop_sequences=None,
+        response_format=None,
+        tools_to_call_from=None,
+        **kwargs,
+    ) -> Generator[ChatMessageStreamDelta, None, None]:
+        last_error: BaseException | None = None
+        for model in self.models:
+            try:
+                stream = model.generate_stream(
+                    messages,
+                    stop_sequences=stop_sequences,
+                    response_format=response_format,
+                    tools_to_call_from=tools_to_call_from,
+                    **kwargs,
+                )
+            except Exception as e:
+                last_error = e
+                self.metrics.record_failure(self._model_name(model), e)
+                continue
+            try:
+                first_delta = next(stream)
+            except StopIteration:
+                self.metrics.record_success(self._model_name(model))
+                return
+            except Exception as e:
+                last_error = e
+                self.metrics.record_failure(self._model_name(model), e)
+                continue
+            # 首个 delta 成功 → 锁定该模型,不再降级
+            self.metrics.record_success(self._model_name(model))
+            yield first_delta
+            yield from stream
+            return
         raise last_error
