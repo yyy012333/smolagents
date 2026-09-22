@@ -1,5 +1,11 @@
 from enum import Enum
+from logging import getLogger
 from typing import Any
+
+from .models import ChatMessage, Model
+from .utils import Retrying
+
+logger = getLogger(__name__)
 
 
 class ErrorClass(str, Enum):
@@ -54,3 +60,68 @@ class FallbackMetrics:
             "fallbacks": list(self._fallbacks),
             "served_by": list(self._served_by),
         }
+
+
+class FallbackModel(Model):
+    """Composes several models: primary first, fallbacks in order, on failure."""
+
+    def __init__(
+        self,
+        models: list[Model],
+        transient_retries: int = 3,
+        wait_seconds: float = 1.0,
+        exponential_base: float = 2.0,
+        jitter: bool = True,
+        **kwargs,
+    ):
+        if not models:
+            raise ValueError("FallbackModel requires at least one model")
+        self.models = list(models)
+        self.transient_retries = transient_retries
+        self.wait_seconds = wait_seconds
+        self.exponential_base = exponential_base
+        self.jitter = jitter
+        self.retryer = Retrying(
+            max_attempts=transient_retries,
+            wait_seconds=wait_seconds,
+            exponential_base=exponential_base,
+            jitter=jitter,
+            retry_predicate=is_transient_error,
+            reraise=True,
+        )
+        self.metrics = FallbackMetrics()
+        model_id = ",".join(m.model_id for m in self.models if m.model_id) or None
+        super().__init__(model_id=model_id, **kwargs)
+
+    def _model_name(self, model: Model) -> str:
+        return model.model_id or model.__class__.__name__
+
+    def generate(
+        self,
+        messages,
+        stop_sequences=None,
+        response_format=None,
+        tools_to_call_from=None,
+        **kwargs,
+    ) -> ChatMessage:
+        last_error: BaseException | None = None
+        for model in self.models:
+            try:
+                result = self.retryer(
+                    model.generate,
+                    messages,
+                    stop_sequences=stop_sequences,
+                    response_format=response_format,
+                    tools_to_call_from=tools_to_call_from,
+                    **kwargs,
+                )
+                self.metrics.record_success(self._model_name(model))
+                return result
+            except Exception as e:
+                last_error = e
+                self.metrics.record_failure(self._model_name(model), e)
+                logger.info(
+                    "Model '%s' failed (%s: %s), falling back.",
+                    self._model_name(model), e.__class__.__name__, e,
+                )
+        raise last_error
