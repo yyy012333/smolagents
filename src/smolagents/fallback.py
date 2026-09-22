@@ -19,6 +19,12 @@ _TRANSIENT_KEYWORDS = ("502", "503", "504", "500", "timeout", "timed out", "conn
 
 
 def classify_error(exception: BaseException) -> ErrorClass:
+    """Classify an exception into rate-limit, transient, or non-retryable.
+
+    Rate-limit errors should be retried with a long backoff; transient errors
+    (5xx / timeout / connection) with a short backoff; non-retryable errors
+    (e.g. 4xx) should not be retried at all.
+    """
     error_str = str(exception).lower()
     if any(kw in error_str for kw in _RATE_LIMIT_KEYWORDS):
         return ErrorClass.RATE_LIMIT
@@ -28,6 +34,7 @@ def classify_error(exception: BaseException) -> ErrorClass:
 
 
 def is_transient_error(exception: BaseException) -> bool:
+    """Return True if the exception is a transient error (5xx / timeout / connection)."""
     return classify_error(exception) == ErrorClass.TRANSIENT
 
 
@@ -63,7 +70,37 @@ class FallbackMetrics:
 
 
 class FallbackModel(Model):
-    """Composes several models: primary first, fallbacks in order, on failure."""
+    """A model that composes several models and transparently falls back on failure.
+
+    Tries each model in order; if one raises (after exhausting transient retries),
+    it tries the next. The agent using this model is unaware of the fallback — it
+    simply receives the first successful result. Rate-limit (429) errors are still
+    handled by each model's own internal retryer; this layer only retries transient
+    errors (5xx / timeout / connection) before falling back.
+
+    Parameters:
+        models (`list[Model]`):
+            Ordered list of models. `models[0]` is the primary; the rest are fallbacks.
+        transient_retries (`int`, default `3`):
+            Number of attempts per model for transient errors (5xx / timeout / connection).
+        wait_seconds (`float`, default `1.0`):
+            Initial backoff in seconds before retrying a transient error (exponential).
+        exponential_base (`float`, default `2.0`):
+            Base for the exponential backoff.
+        jitter (`bool`, default `True`):
+            Whether to add random jitter to the backoff delay.
+        **kwargs:
+            Forwarded to the base `Model` (e.g. `flatten_messages_as_text`).
+
+    Example:
+    ```python
+    >>> from smolagents import FallbackModel, OpenAIModel
+    >>> model = FallbackModel([
+    ...     OpenAIModel("gpt-4o-mini"),
+    ...     OpenAIModel("gpt-4o"),  # fallback if the primary is down
+    ... ])
+    ```
+    """
 
     def __init__(
         self,
