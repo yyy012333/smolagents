@@ -100,3 +100,43 @@ def test_fallback_all_fail_raises_last():
 def test_fallback_requires_models():
     with pytest.raises(ValueError, match="at least one model"):
         FallbackModel([])
+
+
+class FlakyModel(Model):
+    """前 fail_times 次调用抛瞬时错误,之后成功。"""
+
+    def __init__(self, model_id="flaky", fail_times=2):
+        super().__init__(model_id=model_id)
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def generate(self, messages, **kwargs):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise Exception("502 Bad Gateway")
+        return ChatMessage(role=MessageRole.ASSISTANT, content=f"ok-from-{self.model_id}")
+
+
+def test_transient_error_is_retried_without_fallback():
+    primary = FlakyModel(model_id="primary", fail_times=2)  # 前 2 次 502,第 3 次成功
+    backup = FakeModel(model_id="backup")
+    model = FallbackModel([primary, backup], transient_retries=3, wait_seconds=0)
+
+    result = model.generate([ChatMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.content == "ok-from-primary"  # 重试后主模型自己成功
+    assert primary.calls == 3                   # 被重试了 2 次
+    assert backup.calls == 0                    # 没有降级
+    assert model.metrics.summary()["fallback_count"] == 0
+
+
+def test_transient_error_exhausts_then_falls_back():
+    primary = FakeModel(model_id="primary", fail_with=Exception("502 Bad Gateway"))  # 一直 502
+    backup = FakeModel(model_id="backup")
+    model = FallbackModel([primary, backup], transient_retries=2, wait_seconds=0)
+
+    result = model.generate([ChatMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.content == "ok-from-backup"   # 重试耗尽后降级
+    assert primary.calls == 2                   # transient_retries=2 → 恰好 2 次
+    assert model.metrics.summary()["fallback_count"] == 1
