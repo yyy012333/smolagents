@@ -2,7 +2,7 @@ from enum import Enum
 from logging import getLogger
 from typing import Any, Generator
 
-from .models import ChatMessage, ChatMessageStreamDelta, Model
+from .models import MODEL_REGISTRY, ChatMessage, ChatMessageStreamDelta, Model
 from .utils import Retrying
 
 logger = getLogger(__name__)
@@ -163,3 +163,43 @@ class FallbackModel(Model):
             yield from stream
             return
         raise last_error
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model_id": self.model_id,
+            "models": [
+                {"class": m.__class__.__name__, "data": m.to_dict()}
+                for m in self.models
+            ],
+            "transient_retries": self.transient_retries,
+            "wait_seconds": self.wait_seconds,
+            "exponential_base": self.exponential_base,
+            "jitter": self.jitter,
+        }
+
+    @classmethod
+    def from_dict(cls, model_dictionary: dict[str, Any]) -> "FallbackModel":
+        models = []
+        for m in model_dictionary["models"]:
+            model_cls = MODEL_REGISTRY.get(m["class"])
+            if model_cls is None:
+                raise ValueError(f"Unknown model class '{m['class']}'")
+            models.append(model_cls.from_dict(m["data"]))
+        return cls(
+            models=models,
+            transient_retries=model_dictionary.get("transient_retries", 3),
+            wait_seconds=model_dictionary.get("wait_seconds", 1.0),
+            exponential_base=model_dictionary.get("exponential_base", 2.0),
+            jitter=model_dictionary.get("jitter", True),
+        )
+
+
+MODEL_REGISTRY["FallbackModel"] = FallbackModel
+
+__all__ = [
+    "ErrorClass",
+    "classify_error",
+    "is_transient_error",
+    "FallbackMetrics",
+    "FallbackModel",
+]

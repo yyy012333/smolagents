@@ -1,7 +1,8 @@
 import pytest
+from unittest.mock import patch
 
 from smolagents.fallback import ErrorClass, FallbackMetrics, FallbackModel, classify_error, is_transient_error
-from smolagents.models import ChatMessage, ChatMessageStreamDelta, MessageRole, Model
+from smolagents.models import MODEL_REGISTRY, ChatMessage, ChatMessageStreamDelta, MessageRole, Model
 
 
 def test_classify_rate_limit():
@@ -168,3 +169,20 @@ def test_generate_stream_falls_back_on_first_delta_failure():
 
     assert "".join(d.content for d in deltas) == "hello world"
     assert model.metrics.summary()["fallback_count"] == 1
+
+
+def test_fallback_model_serialization_roundtrip():
+    primary = FakeModel(model_id="primary")
+    backup = FakeModel(model_id="backup")
+    model = FallbackModel([primary, backup], transient_retries=5, wait_seconds=0)
+
+    d = model.to_dict()
+    assert d["model_id"] == "primary,backup"
+    assert [m["class"] for m in d["models"]] == ["FakeModel", "FakeModel"]
+    assert d["transient_retries"] == 5
+
+    with patch.dict(MODEL_REGISTRY, {"FakeModel": FakeModel}):
+        restored = FallbackModel.from_dict(d)
+
+    assert [m.model_id for m in restored.models] == ["primary", "backup"]
+    assert restored.transient_retries == 5

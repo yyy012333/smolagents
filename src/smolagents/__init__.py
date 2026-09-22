@@ -24,6 +24,7 @@ from .local_python_executor import *
 from .mcp_client import *
 from .memory import *
 from .models import *
+from .fallback import *
 from .monitoring import *
 from .remote_executors import *
 from .serialization import *
