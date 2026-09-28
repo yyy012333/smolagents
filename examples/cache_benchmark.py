@@ -52,6 +52,7 @@ class FakeModel(Model):
 
 def main():
     embedder = SentenceTransformerEmbedder()
+    embedder.embed("warmup")  # 预热:提前加载 embedding 模型,避免首个阈值的计时被模型加载污染
     model = FakeModel()
     cache = SemanticCacheModel(model, embedder, threshold=0.7, max_size=100)
 
